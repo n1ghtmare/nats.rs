@@ -151,7 +151,7 @@ impl ObjectStore {
         let mut object_info = self.info(object_name).await?;
         object_info.chunks = 0;
         object_info.size = 0;
-        object_info.deleted = true;
+        object_info.deleted = Some(true);
 
         let data = serde_json::to_vec(&object_info)?;
 
@@ -291,12 +291,12 @@ impl ObjectStore {
             nuid: object_nuid,
             chunks: object_chunks,
             size: object_size,
-            digest: format!(
+            digest: Some(format!(
                 "SHA-256={}",
                 base64::encode_config(digest, base64::URL_SAFE)
-            ),
+            )),
             modified: OffsetDateTime::now_utc(),
-            deleted: false,
+            deleted: Some(false),
         };
 
         let mut headers = HeaderMap::new();
@@ -481,7 +481,7 @@ impl Stream for List<'_> {
                             self.done = true;
                         }
                         let response: ObjectInfo = serde_json::from_slice(&message.payload)?;
-                        if response.deleted {
+                        if response.deleted.unwrap_or(false) {
                             continue;
                         }
                         return Poll::Ready(Some(
@@ -566,8 +566,17 @@ impl tokio::io::AsyncRead for Object<'_> {
                         if info.pending == 0 {
                             let digest = self.digest.take().map(|context| context.finish());
                             if let Some(digest) = digest {
-                                if format!("SHA-256={}", base64::encode_config(digest, URL_SAFE))
-                                    != self.info.digest
+                                if self
+                                    .info
+                                    .digest
+                                    .as_ref()
+                                    .map(|digest_self| {
+                                        format!(
+                                            "SHA-256={}",
+                                            base64::encode_config(digest, URL_SAFE)
+                                        ) != *digest_self
+                                    })
+                                    .unwrap_or(false)
                                 {
                                     return Poll::Ready(Err(io::Error::new(
                                         ErrorKind::InvalidData,
@@ -616,11 +625,12 @@ pub struct ObjectInfo {
     pub chunks: usize,
     /// Date and time the object was last modified.
     #[serde(with = "rfc3339")]
+    #[serde(rename = "mtime")]
     pub modified: time::OffsetDateTime,
     /// Digest of the object stream.
-    pub digest: String,
+    pub digest: Option<String>,
     /// Set to true if the object has been deleted.
-    pub deleted: bool,
+    pub deleted: Option<bool>,
 }
 /// A link to another object, potentially in another bucket.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
