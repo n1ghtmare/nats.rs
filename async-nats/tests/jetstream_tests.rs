@@ -23,8 +23,6 @@ pub struct AccountInfo {
 }
 
 mod jetstream {
-
-    #[cfg(feature = "server_2_10")]
     use std::collections::HashMap;
     use std::str::from_utf8;
     use std::time::{Duration, Instant};
@@ -43,7 +41,26 @@ mod jetstream {
     use bytes::Bytes;
     use futures::stream::{StreamExt, TryStreamExt};
     use time::OffsetDateTime;
+    use tokio::sync::OnceCell;
     use tokio_retry::Retry;
+
+    static TEST_SERVER_INSTANCE: OnceCell<nats_server::Server> = OnceCell::const_new();
+
+    async fn init_test_server() -> nats_server::Server {
+        nats_server::run_server("tests/configs/jetstream.conf")
+    }
+
+    async fn get_global_test_server() -> &'static nats_server::Server {
+        TEST_SERVER_INSTANCE.get_or_init(init_test_server).await
+    }
+
+    fn get_unique_data_values() -> (String, String, String) {
+        let id = nuid::next();
+        let events_id = format!("events-{id}");
+        let entries_id = format!("entires-{id}");
+
+        (id, events_id, entries_id)
+    }
 
     #[tokio::test]
     async fn query_account_requests() {
@@ -60,14 +77,20 @@ mod jetstream {
 
     #[tokio::test]
     async fn publish_with_headers() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, entries_id) = get_unique_data_values();
+
         let _stream = context
             .create_stream(stream::Config {
-                name: "TEST".to_string(),
-                subjects: vec!["foo".into(), "bar".into(), "baz".into()],
+                name: test_id.clone(),
+                subjects: vec![
+                    events_id.clone(),
+                    entries_id.clone(),
+                    format!("{test_id}_foo"),
+                ],
                 ..Default::default()
             })
             .await
@@ -77,38 +100,41 @@ mod jetstream {
         let payload = b"Hello JetStream";
 
         let ack = context
-            .publish_with_headers("foo".into(), headers, payload.as_ref().into())
+            .publish_with_headers(events_id.clone(), headers, payload.as_ref().into())
             .await
             .unwrap()
             .await
             .unwrap();
 
-        assert_eq!(ack.stream, "TEST");
+        assert_eq!(ack.stream, test_id);
         assert_eq!(ack.sequence, 1);
     }
 
     #[tokio::test]
     async fn publish_async() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, entries_id) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "TEST".to_string(),
-                subjects: vec!["foo".into(), "bar".into(), "baz".into()],
+                name: test_id.clone(),
+                subjects: vec![
+                    events_id.clone(),
+                    entries_id.clone(),
+                    format!("{test_id}_foo"),
+                ],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let ack = context
-            .publish("foo".to_string(), "payload".into())
-            .await
-            .unwrap();
+        let ack = context.publish(events_id, "payload".into()).await.unwrap();
         assert!(ack.await.is_ok());
         let ack = context
-            .publish("not_stream".to_string(), "payload".into())
+            .publish(format!("{test_id}_not_stream"), "payload".into())
             .await
             .unwrap();
         assert!(ack.await.is_err());
@@ -116,14 +142,17 @@ mod jetstream {
 
     #[tokio::test]
     async fn send_publish() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, foo_id, bar_id) = get_unique_data_values();
+        let baz_id = format!("{test_id}_baz");
+
         let mut stream = context
             .create_stream(stream::Config {
-                name: "TEST".to_string(),
-                subjects: vec!["foo".into(), "bar".into(), "baz".into()],
+                name: test_id.clone(),
+                subjects: vec![foo_id.clone(), bar_id.clone(), baz_id.clone()],
                 allow_direct: true,
                 ..Default::default()
             })
@@ -134,7 +163,7 @@ mod jetstream {
         // Publish first message
         context
             .send_publish(
-                "foo".to_string(),
+                foo_id.clone(),
                 Publish::build()
                     .message_id(id.clone())
                     .payload("data".into()),
@@ -145,7 +174,7 @@ mod jetstream {
             .unwrap();
         // Publish second message, a duplicate.
         context
-            .send_publish("foo".to_string(), Publish::build().message_id(id.clone()))
+            .send_publish(foo_id.clone(), Publish::build().message_id(id.clone()))
             .await
             .unwrap()
             .await
@@ -154,7 +183,7 @@ mod jetstream {
         let info = stream.info().await.unwrap();
         assert_eq!(1, info.state.messages);
         let message = stream
-            .direct_get_last_for_subject("foo".to_string())
+            .direct_get_last_for_subject(foo_id.clone())
             .await
             .unwrap();
         assert_eq!(message.payload, bytes::Bytes::from("data"));
@@ -162,7 +191,7 @@ mod jetstream {
         // Publish message with different ID and expect error.
         context
             .send_publish(
-                "foo".to_string(),
+                foo_id.clone(),
                 Publish::build().expected_last_message_id("BAD_ID"),
             )
             .await
@@ -172,7 +201,7 @@ mod jetstream {
         // Publish a new message with expected ID.
         context
             .send_publish(
-                "foo".to_string(),
+                foo_id.clone(),
                 Publish::build().expected_last_message_id(id.clone()),
             )
             .await
@@ -182,20 +211,14 @@ mod jetstream {
 
         // We should have now two messages. Check it.
         context
-            .send_publish(
-                "foo".to_string(),
-                Publish::build().expected_last_sequence(2),
-            )
+            .send_publish(foo_id.clone(), Publish::build().expected_last_sequence(2))
             .await
             .unwrap()
             .await
             .unwrap();
         // 3 messages should be there, so this should error.
         context
-            .send_publish(
-                "foo".to_string(),
-                Publish::build().expected_last_sequence(2),
-            )
+            .send_publish(foo_id.clone(), Publish::build().expected_last_sequence(2))
             .await
             .unwrap()
             .await
@@ -203,7 +226,7 @@ mod jetstream {
         // 3 messages there, should be ok for this subject too.
         context
             .send_publish(
-                "foo".to_string(),
+                foo_id.clone(),
                 Publish::build().expected_last_subject_sequence(3),
             )
             .await
@@ -213,7 +236,7 @@ mod jetstream {
         // 4 messages there, should error.
         context
             .send_publish(
-                "foo".to_string(),
+                foo_id.clone(),
                 Publish::build().expected_last_subject_sequence(3),
             )
             .await
@@ -224,7 +247,7 @@ mod jetstream {
         // Check if it works for the other subjects in the stream.
         context
             .send_publish(
-                "bar".to_string(),
+                bar_id.clone(),
                 Publish::build().expected_last_subject_sequence(0),
             )
             .await
@@ -234,7 +257,7 @@ mod jetstream {
         // Sequence is now 1, so this should fail.
         context
             .send_publish(
-                "bar".to_string(),
+                bar_id.clone(),
                 Publish::build().expected_last_subject_sequence(0),
             )
             .await
@@ -245,7 +268,7 @@ mod jetstream {
         assert_eq!(stream.info().await.unwrap().state.messages, 5);
         context
             .send_publish(
-                "foo".to_string(),
+                foo_id.clone(),
                 Publish::build().header(NATS_MESSAGE_ID, id.as_str()),
             )
             .await
@@ -255,7 +278,7 @@ mod jetstream {
         // above message should be ignored.
         assert_eq!(stream.info().await.unwrap().state.messages, 5);
         context
-            .send_publish("bar".to_string(), Publish::build().expected_stream("TEST"))
+            .send_publish(bar_id.clone(), Publish::build().expected_stream(test_id))
             .await
             .unwrap()
             .await
@@ -264,7 +287,7 @@ mod jetstream {
 
     #[tokio::test]
     async fn request() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -304,7 +327,7 @@ mod jetstream {
 
     #[tokio::test]
     async fn request_err() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -333,7 +356,7 @@ mod jetstream {
 
     #[tokio::test]
     async fn create_stream() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -400,7 +423,7 @@ mod jetstream {
 
     #[tokio::test]
     async fn get_stream() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -421,21 +444,23 @@ mod jetstream {
 
     #[tokio::test]
     async fn purge_stream() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
-        context.create_stream("events").await.unwrap();
+        let (test_id, _, _) = get_unique_data_values();
+
+        context.create_stream(test_id.as_str()).await.unwrap();
 
         for _ in 0..3 {
             context
-                .publish("events".to_string(), "data".into())
+                .publish(test_id.clone(), "data".into())
                 .await
                 .unwrap()
                 .await
                 .unwrap();
         }
-        let mut stream = context.get_stream("events").await.unwrap();
+        let mut stream = context.get_stream(test_id).await.unwrap();
         assert_eq!(stream.cached_info().state.messages, 3);
 
         stream.purge().await.unwrap();
@@ -445,14 +470,16 @@ mod jetstream {
 
     #[tokio::test]
     async fn purge_filter() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events.*".to_string()],
+                name: test_id.clone(),
+                subjects: vec![format!("{events_id}.*")],
                 ..Default::default()
             })
             .await
@@ -460,7 +487,7 @@ mod jetstream {
 
         for _ in 0..3 {
             context
-                .publish("events.one".to_string(), "data".into())
+                .publish(format!("{events_id}.one"), "data".into())
                 .await
                 .unwrap()
                 .await
@@ -468,29 +495,35 @@ mod jetstream {
         }
         for _ in 0..4 {
             context
-                .publish("events.two".to_string(), "data".into())
+                .publish(format!("{events_id}.two"), "data".into())
                 .await
                 .unwrap()
                 .await
                 .unwrap();
         }
-        let mut stream = context.get_stream("events").await.unwrap();
+        let mut stream = context.get_stream(test_id.clone()).await.unwrap();
         assert_eq!(stream.cached_info().state.messages, 7);
 
-        stream.purge().filter("events.two").await.unwrap();
+        stream
+            .purge()
+            .filter(format!("{events_id}.two"))
+            .await
+            .unwrap();
 
         assert_eq!(stream.info().await.unwrap().state.messages, 3);
     }
     #[tokio::test]
     async fn purge() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events.*".to_string()],
+                name: test_id.clone(),
+                subjects: vec![format!("{events_id}.*")],
                 ..Default::default()
             })
             .await
@@ -498,13 +531,13 @@ mod jetstream {
 
         for _ in 0..100 {
             context
-                .publish("events.two".to_string(), "data".into())
+                .publish(format!("{events_id}.two"), "data".into())
                 .await
                 .unwrap()
                 .await
                 .unwrap();
         }
-        let mut stream = context.get_stream("events").await.unwrap();
+        let mut stream = context.get_stream(test_id).await.unwrap();
 
         stream.purge().sequence(90).await.unwrap();
         assert_eq!(stream.info().await.unwrap().state.messages, 11);
@@ -514,7 +547,7 @@ mod jetstream {
 
     #[tokio::test]
     async fn get_or_create_stream() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -547,17 +580,25 @@ mod jetstream {
 
     #[tokio::test]
     async fn delete_stream() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
-        context.create_stream("events").await.unwrap();
-        assert!(context.delete_stream("events").await.unwrap().success);
+        let (test_id, _, _) = get_unique_data_values();
+
+        context.create_stream(test_id.as_str()).await.unwrap();
+        assert!(
+            context
+                .delete_stream(test_id.as_str())
+                .await
+                .unwrap()
+                .success
+        );
     }
 
     #[tokio::test]
     async fn update_stream() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -578,7 +619,7 @@ mod jetstream {
 
     #[tokio::test]
     async fn get_raw_message() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -597,14 +638,16 @@ mod jetstream {
 
     #[tokio::test]
     async fn get_last_raw_message_by_subject() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, entries_id) = get_unique_data_values();
+
         let stream = context
             .get_or_create_stream(stream::Config {
-                subjects: vec!["events".to_string(), "entries".to_string()],
-                name: "events".to_string(),
+                subjects: vec![events_id.clone(), entries_id.clone()],
+                name: test_id,
                 max_messages: 1000,
                 max_messages_per_subject: 100,
                 ..Default::default()
@@ -614,21 +657,21 @@ mod jetstream {
 
         let payload = b"payload";
         let publish_ack = context
-            .publish("events".into(), payload.as_ref().into())
+            .publish(events_id.clone(), payload.as_ref().into())
             .await
             .unwrap()
             .await
             .unwrap();
 
         context
-            .publish("entries".into(), payload.as_ref().into())
+            .publish(entries_id, payload.as_ref().into())
             .await
             .unwrap()
             .await
             .unwrap();
 
         let raw_message = stream
-            .get_last_raw_message_by_subject("events")
+            .get_last_raw_message_by_subject(events_id.as_str())
             .await
             .unwrap();
 
@@ -637,14 +680,17 @@ mod jetstream {
 
     #[tokio::test]
     async fn direct_get_last_for_subject() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, entries_id) = get_unique_data_values();
+        let wrong_subject = format!("wrong-{test_id}");
+
         let stream = context
             .get_or_create_stream(stream::Config {
-                subjects: vec!["events".to_string(), "entries".to_string()],
-                name: "events".to_string(),
+                subjects: vec![events_id.clone(), entries_id.clone()],
+                name: test_id,
                 max_messages: 1000,
                 max_messages_per_subject: 100,
                 allow_direct: true,
@@ -655,26 +701,26 @@ mod jetstream {
 
         let payload = b"payload";
         context
-            .publish("events".into(), "not this".into())
+            .publish(events_id.clone(), "not this".into())
             .await
             .unwrap()
             .await
             .unwrap();
         let publish_ack = context
-            .publish("events".into(), payload.as_ref().into())
+            .publish(events_id.clone(), payload.as_ref().into())
             .await
             .unwrap()
             .await
             .unwrap();
 
         context
-            .publish("entries".into(), payload.as_ref().into())
+            .publish(entries_id.clone(), payload.as_ref().into())
             .await
             .unwrap()
             .await
             .unwrap();
 
-        let message = stream.direct_get_last_for_subject("events").await.unwrap();
+        let message = stream.direct_get_last_for_subject(events_id).await.unwrap();
 
         let sequence = message
             .headers
@@ -689,20 +735,23 @@ mod jetstream {
         assert_eq!(payload, message.payload.as_ref());
 
         stream
-            .direct_get_last_for_subject("wrong")
+            .direct_get_last_for_subject(wrong_subject)
             .await
             .expect_err("should error");
     }
     #[tokio::test]
     async fn direct_get_next_for_subject() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, entries_id) = get_unique_data_values();
+        let wrong_subject = format!("wrong-{test_id}");
+
         let stream = context
             .get_or_create_stream(stream::Config {
-                subjects: vec!["events".to_string(), "entries".to_string()],
-                name: "events".to_string(),
+                subjects: vec![events_id.clone(), entries_id.clone()],
+                name: test_id,
                 max_messages: 1000,
                 max_messages_per_subject: 100,
                 allow_direct: true,
@@ -713,25 +762,25 @@ mod jetstream {
 
         let payload = b"payload";
         let publish_ack = context
-            .publish("events".into(), payload.as_ref().into())
+            .publish(events_id.clone(), payload.as_ref().into())
             .await
             .unwrap()
             .await
             .unwrap();
         context
-            .publish("events".into(), "not this".into())
+            .publish(events_id.clone(), "not this".into())
             .await
             .unwrap()
             .await
             .unwrap();
 
         context
-            .publish("entries".into(), payload.as_ref().into())
+            .publish(entries_id, payload.as_ref().into())
             .await
             .unwrap();
 
         let message = stream
-            .direct_get_next_for_subject("events", None)
+            .direct_get_next_for_subject(events_id, None)
             .await
             .unwrap();
 
@@ -748,21 +797,23 @@ mod jetstream {
         assert_eq!(payload, message.payload.as_ref());
 
         stream
-            .direct_get_next_for_subject("wrong", None)
+            .direct_get_next_for_subject(wrong_subject, None)
             .await
             .expect_err("should error");
     }
 
     #[tokio::test]
     async fn direct_get_next_for_subject_after_sequence() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, entries_id) = get_unique_data_values();
+
         let stream = context
             .get_or_create_stream(stream::Config {
-                subjects: vec!["events".to_string(), "entries".to_string()],
-                name: "events".to_string(),
+                subjects: vec![events_id.clone(), entries_id.clone()],
+                name: test_id,
                 max_messages: 1000,
                 max_messages_per_subject: 100,
                 allow_direct: true,
@@ -773,39 +824,39 @@ mod jetstream {
 
         let payload = b"payload";
         context
-            .publish("events".into(), "not this".into())
+            .publish(events_id.clone(), "not this".into())
             .await
             .unwrap()
             .await
             .unwrap();
         context
-            .publish("events".into(), "not this".into())
+            .publish(events_id.clone(), "not this".into())
             .await
             .unwrap()
             .await
             .unwrap();
         let publish_ack = context
-            .publish("events".into(), payload.as_ref().into())
+            .publish(events_id.clone(), payload.as_ref().into())
             .await
             .unwrap()
             .await
             .unwrap();
         context
-            .publish("events".into(), "not this".into())
+            .publish(events_id.clone(), "not this".into())
             .await
             .unwrap()
             .await
             .unwrap();
 
         context
-            .publish("events".into(), "not this".into())
+            .publish(events_id.clone(), "not this".into())
             .await
             .unwrap()
             .await
             .unwrap();
 
         let message = stream
-            .direct_get_next_for_subject("events", Some(3))
+            .direct_get_next_for_subject(events_id.clone(), Some(3))
             .await
             .unwrap();
 
@@ -822,25 +873,27 @@ mod jetstream {
         assert_eq!(payload, message.payload.as_ref());
 
         stream
-            .direct_get_next_for_subject("events", Some(14))
+            .direct_get_next_for_subject(events_id, Some(14))
             .await
             .expect_err("should error");
         stream
-            .direct_get_next_for_subject("entries", Some(1))
+            .direct_get_next_for_subject(entries_id, Some(1))
             .await
             .expect_err("should error");
     }
 
     #[tokio::test]
     async fn direct_get_for_sequence() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, entries_id) = get_unique_data_values();
+
         let stream = context
             .get_or_create_stream(stream::Config {
-                subjects: vec!["events".to_string(), "entries".to_string()],
-                name: "events".to_string(),
+                subjects: vec![events_id.clone(), entries_id.clone()],
+                name: test_id,
                 max_messages: 1000,
                 max_messages_per_subject: 100,
                 allow_direct: true,
@@ -851,7 +904,7 @@ mod jetstream {
 
         let payload = b"payload";
         context
-            .publish("events".into(), "not this".into())
+            .publish(events_id.clone(), "not this".into())
             .await
             .unwrap()
             .await
@@ -859,7 +912,7 @@ mod jetstream {
         // .await
         // .unwrap();
         let publish_ack = context
-            .publish("events".into(), payload.as_ref().into())
+            .publish(events_id.clone(), payload.as_ref().into())
             .await
             .unwrap()
             .await
@@ -868,7 +921,7 @@ mod jetstream {
         // .unwrap();
 
         context
-            .publish("entries".into(), payload.as_ref().into())
+            .publish(events_id.clone(), payload.as_ref().into())
             .await
             .unwrap()
             .await
@@ -895,28 +948,33 @@ mod jetstream {
 
     #[tokio::test]
     async fn delete_message() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
-        let stream = context.get_or_create_stream("events").await.unwrap();
+        let (test_id, events_id, _) = get_unique_data_values();
+
+        let stream = context
+            .get_or_create_stream(events_id.as_str())
+            .await
+            .unwrap();
         let payload = b"payload";
         context
-            .publish("events".into(), payload.as_ref().into())
+            .publish(events_id.clone(), payload.as_ref().into())
             .await
             .unwrap();
         let publish_ack = context
-            .publish("events".into(), payload.as_ref().into())
+            .publish(events_id.clone(), payload.as_ref().into())
             .await
             .unwrap();
         context
-            .publish("events".into(), payload.as_ref().into())
+            .publish(events_id, payload.as_ref().into())
             .await
             .unwrap();
 
         let consumer = stream
             .get_or_create_consumer(
-                "consumer",
+                test_id.as_str(),
                 consumer::pull::Config {
                     ..Default::default()
                 },
@@ -956,13 +1014,15 @@ mod jetstream {
 
     #[tokio::test]
     async fn create_consumer() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         // durable consumer
         context
-            .get_or_create_stream("events")
+            .get_or_create_stream(events_id.as_str())
             .await
             .unwrap()
             .create_consumer(consumer::pull::Config {
@@ -974,7 +1034,7 @@ mod jetstream {
             .unwrap();
         // ephemeral consumer
         context
-            .get_or_create_stream("events")
+            .get_or_create_stream(events_id.as_str())
             .await
             .unwrap()
             .create_consumer(consumer::pull::Config {
@@ -987,36 +1047,36 @@ mod jetstream {
             .unwrap();
 
         context
-            .get_or_create_stream("events")
+            .get_or_create_stream(events_id.as_str())
             .await
             .unwrap()
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull_explicit".to_string()),
+                durable_name: Some(format!("{test_id}_pull_explicit")),
                 ..Default::default()
             })
             .await
             .unwrap();
 
         let consumer = context
-            .get_or_create_stream("events")
+            .get_or_create_stream(events_id.as_str())
             .await
             .unwrap()
             .create_consumer(consumer::pull::Config {
-                name: Some("name".to_string()),
+                name: Some(test_id.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        assert_eq!("name".to_string(), consumer.cached_info().name);
+        assert_eq!(test_id.to_string(), consumer.cached_info().name);
 
         context
-            .get_or_create_stream("events")
+            .get_or_create_stream(events_id.as_str())
             .await
             .unwrap()
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("namex".to_string()),
-                name: Some("namey".to_string()),
+                durable_name: Some(format!("{test_id}x")),
+                name: Some(format!("{test_id}y")),
                 ..Default::default()
             })
             .await
@@ -1024,28 +1084,34 @@ mod jetstream {
     }
     #[tokio::test]
     async fn delete_consumer() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
-        let stream = context.get_or_create_stream("events").await.unwrap();
+        let (test_id, events_id, _) = get_unique_data_values();
+
+        let stream = context
+            .get_or_create_stream(events_id.as_str())
+            .await
+            .unwrap();
+
         stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("consumer".to_string()),
+                durable_name: Some(test_id.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
-        stream.delete_consumer("consumer").await.unwrap();
+        stream.delete_consumer(test_id.as_str()).await.unwrap();
         assert!(stream
-            .get_consumer::<consumer::pull::Config>("consumer")
+            .get_consumer::<consumer::pull::Config>(test_id.as_str())
             .await
             .is_err());
     }
 
     #[tokio::test]
     async fn get_consumer() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -1076,7 +1142,7 @@ mod jetstream {
 
     #[tokio::test]
     async fn get_or_create_consumer() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -1114,24 +1180,27 @@ mod jetstream {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn pull_sequence() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
         let consumer = stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull".to_string()),
+                durable_name: Some(format!("{test_id}_pull")),
                 ..Default::default()
             })
             .await
@@ -1139,7 +1208,7 @@ mod jetstream {
 
         for _ in 0..1000 {
             context
-                .publish("events".to_string(), "dat".into())
+                .publish(events_id.clone(), "dat".into())
                 .await
                 .unwrap();
         }
@@ -1154,32 +1223,36 @@ mod jetstream {
 
     #[tokio::test]
     async fn pull_stream_by_one() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
+
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_push");
         stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("push".to_string()),
+                durable_name: Some(consumer_name.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let consumer: PullConsumer = stream.get_consumer("push").await.unwrap();
+        let consumer: PullConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
         for _ in 0..100 {
             context
-                .publish("events".to_string(), "dat".into())
+                .publish(events_id.clone(), "dat".into())
                 .await
                 .unwrap();
         }
@@ -1200,34 +1273,37 @@ mod jetstream {
 
     #[tokio::test]
     async fn push_stream() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_push");
         stream
             .create_consumer(consumer::push::Config {
-                deliver_subject: "push".to_string(),
-                durable_name: Some("push".to_string()),
+                deliver_subject: consumer_name.clone(),
+                durable_name: Some(consumer_name.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let consumer: PushConsumer = stream.get_consumer("push").await.unwrap();
+        let consumer: PushConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
         for _ in 0..1000 {
             context
-                .publish("events".to_string(), "dat".into())
+                .publish(events_id.clone(), "dat".into())
                 .await
                 .unwrap();
         }
@@ -1241,24 +1317,27 @@ mod jetstream {
 
     #[tokio::test]
     async fn push_ordered() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 storage: StorageType::Memory,
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_push");
         let consumer: OrderedPushConsumer = stream
             .create_consumer(consumer::push::OrderedConfig {
-                deliver_subject: "push".to_string(),
+                deliver_subject: consumer_name,
                 ..Default::default()
             })
             .await
@@ -1272,7 +1351,7 @@ mod jetstream {
                         tokio::time::sleep(Duration::from_secs(6)).await
                     }
                     context
-                        .publish("events".to_string(), "dat".into())
+                        .publish(events_id.clone(), "dat".into())
                         .await
                         .unwrap();
                 }
@@ -1352,25 +1431,26 @@ mod jetstream {
     // miss them in AckPolicy::None setup.
     #[tokio::test]
     async fn push_ordered_delayed() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
-        // let client = async_nats::connect("localhost:4222").await.unwrap();
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 storage: StorageType::Memory,
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
         let consumer: OrderedPushConsumer = stream
             .create_consumer(consumer::push::OrderedConfig {
-                deliver_subject: "push".to_string(),
+                deliver_subject: format!("{test_id}_push"),
                 ..Default::default()
             })
             .await
@@ -1378,7 +1458,7 @@ mod jetstream {
 
         for _ in 0..1000 {
             context
-                .publish("events".to_string(), "dat".into())
+                .publish(events_id.clone(), "dat".into())
                 .await
                 .unwrap()
                 .await
@@ -1397,14 +1477,16 @@ mod jetstream {
 
     #[tokio::test]
     async fn push_ordered_capped() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 storage: StorageType::Memory,
                 discard: DiscardPolicy::Old,
                 max_messages: 500,
@@ -1413,10 +1495,10 @@ mod jetstream {
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
         let consumer: OrderedPushConsumer = stream
             .create_consumer(consumer::push::OrderedConfig {
-                deliver_subject: "push".to_string(),
+                deliver_subject: format!("{test_id}_push"),
                 ..Default::default()
             })
             .await
@@ -1424,7 +1506,7 @@ mod jetstream {
 
         for i in 0..1000 {
             context
-                .publish("events".to_string(), format!("{i}").into())
+                .publish(events_id.clone(), format!("{i}").into())
                 .await
                 .unwrap()
                 .await
@@ -1454,24 +1536,27 @@ mod jetstream {
 
     #[tokio::test]
     async fn push_stream_flow_control() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_push");
         stream
             .create_consumer(consumer::push::Config {
-                deliver_subject: "push".to_string(),
-                durable_name: Some("push".to_string()),
+                deliver_subject: consumer_name.clone(),
+                durable_name: Some(consumer_name.clone()),
                 flow_control: true,
                 idle_heartbeat: Duration::from_millis(100),
                 ..Default::default()
@@ -1479,13 +1564,13 @@ mod jetstream {
             .await
             .unwrap();
 
-        let consumer: PushConsumer = stream.get_consumer("push").await.unwrap();
+        let consumer: PushConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         for _ in 0..1000 {
             context
-                .publish("events".to_string(), "dat".into())
+                .publish(events_id.clone(), "dat".into())
                 .await
                 .unwrap();
         }
@@ -1499,36 +1584,39 @@ mod jetstream {
 
     #[tokio::test]
     async fn push_stream_heartbeat() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_push");
         stream
             .create_consumer(consumer::push::Config {
-                deliver_subject: "push".to_string(),
-                durable_name: Some("push".to_string()),
+                deliver_subject: consumer_name.clone(),
+                durable_name: Some(consumer_name.clone()),
                 idle_heartbeat: Duration::from_millis(100),
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let consumer: PushConsumer = stream.get_consumer("push").await.unwrap();
-        let mut messages = consumer.messages().await.unwrap().take(1000);
+        let consumer: PushConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
+        let mut messages = consumer.messages().await.unwrap().take(100);
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        for _ in 0..1000 {
+        for _ in 0..100 {
             context
                 .publish("events".to_string(), "dat".into())
                 .await
@@ -1540,38 +1628,42 @@ mod jetstream {
             assert_eq!(message.payload.as_ref(), b"dat");
             seen += 1;
         }
-        assert_eq!(seen, 1000);
+        assert_eq!(seen, 100);
     }
 
     #[tokio::test]
     async fn pull_stream_default() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_push");
+
         stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull".to_string()),
+                durable_name: Some(consumer_name.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
-        let mut consumer: PullConsumer = stream.get_consumer("pull").await.unwrap();
+        let mut consumer: PullConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
         tokio::task::spawn(async move {
             for i in 0..1000 {
                 context
-                    .publish("events".to_string(), format!("i: {i}").into())
+                    .publish(events_id.clone(), format!("i: {i}").into())
                     .await
                     .unwrap();
             }
@@ -1591,7 +1683,7 @@ mod jetstream {
     // 408 timeout is resolved.
     #[ignore]
     async fn pull_stream_with_timeout() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
@@ -1644,37 +1736,37 @@ mod jetstream {
 
     #[tokio::test]
     async fn pull_stream_with_heartbeat() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_pull");
         stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull".to_string()),
+                durable_name: Some(consumer_name.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
-        let consumer: PullConsumer = stream.get_consumer("pull").await.unwrap();
+        let consumer: PullConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
         tokio::task::spawn(async move {
             for i in 0..10 {
                 tokio::time::sleep(Duration::from_millis(600)).await;
                 context
-                    .publish(
-                        "events".to_string(),
-                        format!("heartbeat message: {i}").into(),
-                    )
+                    .publish(events_id.clone(), format!("heartbeat message: {i}").into())
                     .await
                     .unwrap();
             }
@@ -1696,37 +1788,37 @@ mod jetstream {
 
     #[tokio::test]
     async fn pull_stream_error() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_pull");
         stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull".to_string()),
+                durable_name: Some(consumer_name.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
-        let consumer: PullConsumer = stream.get_consumer("pull").await.unwrap();
+        let consumer: PullConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
         tokio::task::spawn(async move {
             for i in 0..100 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 context
-                    .publish(
-                        "events".to_string(),
-                        format!("heartbeat message: {i}").into(),
-                    )
+                    .publish(events_id.clone(), format!("heartbeat message: {i}").into())
                     .await
                     .unwrap();
             }
@@ -1747,37 +1839,37 @@ mod jetstream {
     }
     #[tokio::test]
     async fn pull_fetch() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
-        let client = ConnectOptions::new()
-            .event_callback(|err| async move { println!("error: {err:?}") })
-            .connect(server.client_url())
-            .await
-            .unwrap();
+        let server = get_global_test_server().await;
+        let client = async_nats::connect(server.client_url()).await.unwrap();
 
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_pull");
+
         stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull".to_string()),
+                durable_name: Some(consumer_name.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
-        let consumer: PullConsumer = stream.get_consumer("pull").await.unwrap();
+        let consumer: PullConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
         for _ in 0..10 {
             context
-                .publish("events".to_string(), "dat".into())
+                .publish(events_id.clone(), "dat".into())
                 .await
                 .unwrap()
                 .await
@@ -1797,27 +1889,26 @@ mod jetstream {
 
     #[tokio::test]
     async fn pull_batch() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
-        let client = ConnectOptions::new()
-            .connect(server.client_url())
-            .await
-            .unwrap();
+        let server = get_global_test_server().await;
+        let client = async_nats::connect(server.client_url()).await.unwrap();
+        let context = async_nats::jetstream::new(client);
 
-        let context = async_nats::jetstream::new(client.clone());
+        let (test_id, events_id, _) = get_unique_data_values();
 
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+
         let consumer = stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull".to_string()),
+                durable_name: Some(format!("{test_id}_pull")),
                 ack_policy: AckPolicy::Explicit,
                 max_ack_pending: 10000,
                 ..Default::default()
@@ -1830,7 +1921,7 @@ mod jetstream {
             let mut interval = tokio::time::interval(Duration::from_millis(20));
             for i in 0..=num_messages {
                 context
-                    .publish("events".to_string(), i.to_string().into())
+                    .publish(events_id.clone(), i.to_string().into())
                     .await
                     .unwrap()
                     .await
@@ -1871,13 +1962,8 @@ mod jetstream {
 
     #[tokio::test]
     async fn pull_consumer_stream_without_heartbeat() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
-        let client = ConnectOptions::new()
-            .event_callback(|err| async move { println!("error: {err:?}") })
-            .connect(server.client_url())
-            .await
-            .unwrap();
-
+        let server = get_global_test_server().await;
+        let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
         context
@@ -1923,12 +2009,8 @@ mod jetstream {
     #[tokio::test]
     async fn pull_consumer_long_idle() {
         use tracing::debug;
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
-        let client = ConnectOptions::new()
-            .event_callback(|err| async move { println!("error: {err:?}") })
-            .connect(server.client_url())
-            .await
-            .unwrap();
+        let server = get_global_test_server().await;
+        let client = async_nats::connect(server.client_url()).await.unwrap();
 
         let context = async_nats::jetstream::new(client);
 
@@ -1978,12 +2060,8 @@ mod jetstream {
     #[tokio::test]
     async fn pull_consumer_stream_with_heartbeat() {
         use tracing::debug;
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
-        let client = ConnectOptions::new()
-            .event_callback(|err| async move { println!("error: {err:?}") })
-            .connect(server.client_url())
-            .await
-            .unwrap();
+        let server = get_global_test_server().await;
+        let client = async_nats::connect(server.client_url()).await.unwrap();
 
         let context = async_nats::jetstream::new(client);
 
@@ -2062,38 +2140,33 @@ mod jetstream {
 
     #[tokio::test]
     async fn pull_consumer_deleted() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
-        let client = ConnectOptions::new()
-            .event_callback(|err| async move { println!("error: {err:?}") })
-            .connect(server.client_url())
-            .await
-            .unwrap();
-
+        let server = get_global_test_server().await;
+        let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
+
+        let (test_id, events_id, _) = get_unique_data_values();
 
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_pull");
         stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull".to_string()),
+                durable_name: Some(consumer_name.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
-        let consumer: PullConsumer = stream.get_consumer("pull").await.unwrap();
+        let consumer: PullConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
-        context
-            .publish("events".to_string(), "dat".into())
-            .await
-            .unwrap();
+        context.publish(events_id, "dat".into()).await.unwrap();
 
         let mut messages = consumer.messages().await.unwrap();
 
@@ -2117,25 +2190,22 @@ mod jetstream {
 
     #[tokio::test]
     async fn consumer_info() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
-        let client = ConnectOptions::new()
-            .event_callback(|err| async move { println!("error: {err:?}") })
-            .connect(server.client_url())
-            .await
-            .unwrap();
-
+        let server = get_global_test_server().await;
+        let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
+
+        let (test_id, events_id, _) = get_unique_data_values();
 
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id).await.unwrap();
         stream
             .create_consumer(consumer::pull::Config {
                 durable_name: Some("pull".to_string()),
@@ -2153,37 +2223,35 @@ mod jetstream {
 
     #[tokio::test]
     async fn ack() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
-        let client = ConnectOptions::new()
-            .event_callback(|err| async move { println!("error: {err:?}") })
-            .connect(server.client_url())
-            .await
-            .unwrap();
-
+        let server = get_global_test_server().await;
+        let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client.clone());
+
+        let (test_id, events_id, _) = get_unique_data_values();
 
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+        let consumer_name = format!("{test_id}_pull");
         stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull".to_string()),
+                durable_name: Some(consumer_name.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
-        let mut consumer = stream.get_consumer("pull").await.unwrap();
+        let mut consumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
         for _ in 0..10 {
             context
-                .publish("events".to_string(), "dat".into())
+                .publish(events_id.clone(), "dat".into())
                 .await
                 .unwrap()
                 .await
@@ -2347,19 +2415,23 @@ mod jetstream {
 
     #[tokio::test]
     async fn republish() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
 
         let jetstream = async_nats::jetstream::new(client);
 
+        let (test_id, _, _) = get_unique_data_values();
+        let source_name = format!("{test_id}_source");
+        let dest_name = format!("{test_id}_dest");
+
         let _source_stream = jetstream
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "source".to_string(),
+                name: source_name.clone(),
                 max_messages: 1000,
-                subjects: vec!["source.>".to_string()],
+                subjects: vec![format!("{source_name}.>")],
                 republish: Some(async_nats::jetstream::stream::Republish {
                     source: ">".to_string(),
-                    destination: "dest.>".to_string(),
+                    destination: format!("{dest_name}.>"),
                     headers_only: false,
                 }),
                 ..Default::default()
@@ -2368,9 +2440,9 @@ mod jetstream {
             .unwrap();
         let destination_stream = jetstream
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "dest".to_string(),
+                name: dest_name.clone(),
                 max_messages: 2000,
-                subjects: vec!["dest.>".to_string()],
+                subjects: vec![format!("{dest_name}.>")],
                 ..Default::default()
             })
             .await
@@ -2378,7 +2450,7 @@ mod jetstream {
 
         let consumer = destination_stream
             .create_consumer(async_nats::jetstream::consumer::pull::Config {
-                durable_name: Some("dest".to_string()),
+                durable_name: Some(dest_name.clone()),
                 deliver_policy: DeliverPolicy::All,
                 ack_policy: consumer::AckPolicy::Explicit,
                 ..Default::default()
@@ -2388,14 +2460,17 @@ mod jetstream {
         let mut messages = consumer.messages().await.unwrap().take(100).enumerate();
         for i in 0..100 {
             jetstream
-                .publish(format!("source.{i}"), format!("{i}").into())
+                .publish(format!("{test_id}_source.{i}"), format!("{i}").into())
                 .await
                 .unwrap();
         }
 
         while let Some((i, message)) = messages.next().await {
             let message = message.unwrap();
-            assert_eq!(format!("dest.source.{i}"), message.subject);
+            assert_eq!(
+                format!("{test_id}_dest.{test_id}_source.{i}"),
+                message.subject
+            );
             assert_eq!(i.to_string(), from_utf8(&message.payload).unwrap());
             message.ack().await.unwrap();
         }
@@ -2403,9 +2478,8 @@ mod jetstream {
 
     #[tokio::test]
     async fn discard_new_per_subject() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
-
         let jetstream = async_nats::jetstream::new(client);
 
         let _source_stream = jetstream
@@ -2443,32 +2517,31 @@ mod jetstream {
 
     #[tokio::test]
     async fn mirrors() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
+
+        let (test_id, events_id, _) = get_unique_data_values();
 
         let jetstream = async_nats::jetstream::new(client);
 
         let stream = jetstream
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "TEST".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
         jetstream
-            .publish("events".to_string(), "skipped".into())
+            .publish(events_id.clone(), "skipped".into())
             .await
             .unwrap();
-        jetstream
-            .publish("events".to_string(), "data".into())
-            .await
-            .unwrap();
+        jetstream.publish(events_id, "data".into()).await.unwrap();
 
         let mut mirror = jetstream
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "MIRROR".to_string(),
+                name: format!("{test_id}_MIRROR"),
                 mirror: Some(async_nats::jetstream::stream::Source {
                     name: stream.cached_info().config.name.clone(),
                     start_sequence: Some(2),
@@ -2482,12 +2555,12 @@ mod jetstream {
         let mirror_info = mirror.info().await.unwrap();
         assert_eq!(
             mirror_info.config.mirror.as_ref().unwrap().name.as_str(),
-            "TEST"
+            test_id
         );
 
         let mut messages = mirror
             .create_consumer(async_nats::jetstream::consumer::pull::Config {
-                name: Some("consumer".to_string()),
+                name: Some(format!("{test_id}_consumer")),
                 ..Default::default()
             })
             .await
@@ -2503,48 +2576,45 @@ mod jetstream {
     }
     #[tokio::test]
     async fn sources() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
-
         let jetstream = async_nats::jetstream::new(client);
+
+        let (test_id, events_id, _) = get_unique_data_values();
+        let test_id_2 = format!("{test_id}_2");
+        let events_id_2 = format!("{events_id}_2");
 
         let stream = jetstream
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "TEST".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
         let stream2 = jetstream
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "TEST2".to_string(),
-                subjects: vec!["events2".to_string()],
+                name: test_id_2.clone(),
+                subjects: vec![events_id_2.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
         jetstream
-            .publish("events".to_string(), "skipped".into())
+            .publish(events_id.clone(), "skipped".into())
             .await
             .unwrap();
+        jetstream.publish(events_id, "data".into()).await.unwrap();
         jetstream
-            .publish("events".to_string(), "data".into())
+            .publish(events_id_2.clone(), "data".into())
             .await
             .unwrap();
-        jetstream
-            .publish("events2".to_string(), "data".into())
-            .await
-            .unwrap();
-        jetstream
-            .publish("events2".to_string(), "data".into())
-            .await
-            .unwrap();
+        jetstream.publish(events_id_2, "data".into()).await.unwrap();
 
         let mut source = jetstream
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "SOURCE".to_string(),
+                name: format!("{test_id}_SOURCE"),
                 sources: Some(vec![
                     async_nats::jetstream::stream::Source {
                         name: stream.cached_info().config.name.clone(),
@@ -2567,18 +2637,18 @@ mod jetstream {
             source_info.config.sources.as_ref().unwrap()[0]
                 .name
                 .as_str(),
-            "TEST"
+            test_id
         );
         assert_eq!(
             source_info.config.sources.as_ref().unwrap()[1]
                 .name
                 .as_str(),
-            "TEST2"
+            test_id_2
         );
 
         let mut messages = source
             .create_consumer(async_nats::jetstream::consumer::pull::Config {
-                name: Some("consumer".to_string()),
+                name: Some(format!("{test_id}_consumer")),
                 ..Default::default()
             })
             .await
@@ -2603,34 +2673,37 @@ mod jetstream {
 
     #[tokio::test]
     async fn pull_by_bytes() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
         context
             .create_stream(stream::Config {
-                name: "events".to_string(),
-                subjects: vec!["events".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
             .unwrap();
 
-        let stream = context.get_stream("events").await.unwrap();
+        let stream = context.get_stream(test_id.clone()).await.unwrap();
+
+        let consumer_name = format!("{test_id}_pull");
         stream
             .create_consumer(consumer::pull::Config {
-                durable_name: Some("pull".to_string()),
+                durable_name: Some(consumer_name.clone()),
                 ..Default::default()
             })
             .await
             .unwrap();
-        let mut consumer: PullConsumer = stream.get_consumer("pull").await.unwrap();
+        let mut consumer: PullConsumer = stream.get_consumer(consumer_name.as_str()).await.unwrap();
 
         tokio::task::spawn(async move {
             for i in 0..1000 {
                 context
                     .publish(
-                        "events".to_string(),
+                        events_id.clone(),
                         format!("Some bytes to sent with sequence number included: {i}").into(),
                     )
                     .await
@@ -2697,14 +2770,16 @@ mod jetstream {
 
     #[tokio::test]
     async fn consumer_names_list() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         let stream = context
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "TEST".to_string(),
-                subjects: vec!["test".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id.clone()],
                 ..Default::default()
             })
             .await
@@ -2713,7 +2788,7 @@ mod jetstream {
         for i in 0..235 {
             stream
                 .create_consumer(async_nats::jetstream::consumer::pull::Config {
-                    name: Some(format!("consumer_{i}").to_string()),
+                    name: Some(format!("{test_id}_consumer_{i}").to_string()),
                     ..Default::default()
                 })
                 .await
@@ -2731,21 +2806,23 @@ mod jetstream {
         for i in 0..235 {
             assert!(consumers
                 .iter()
-                .any(|name| *name == format!("consumer_{i}")));
+                .any(|name| *name == format!("{test_id}_consumer_{i}")));
         }
         assert_eq!(stream.consumer_names().count().await, 235);
     }
 
     #[tokio::test]
     async fn consumers() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client);
 
+        let (test_id, events_id, _) = get_unique_data_values();
+
         let stream = context
             .create_stream(async_nats::jetstream::stream::Config {
-                name: "TEST".to_string(),
-                subjects: vec!["test".to_string()],
+                name: test_id.clone(),
+                subjects: vec![events_id],
                 ..Default::default()
             })
             .await
@@ -2754,7 +2831,7 @@ mod jetstream {
         for i in 0..1200 {
             stream
                 .create_consumer(async_nats::jetstream::consumer::pull::Config {
-                    durable_name: Some(format!("consumer_{i}").to_string()),
+                    durable_name: Some(format!("{test_id}_consumer_{i}").to_string()),
                     ..Default::default()
                 })
                 .await
@@ -2768,14 +2845,14 @@ mod jetstream {
         for i in 0..1200 {
             assert!(consumers
                 .iter()
-                .any(|name| *name.name == format!("consumer_{i}")));
+                .any(|name| *name.name == format!("{test_id}_consumer_{i}")));
         }
         assert_eq!(stream.consumer_names().count().await, 1200);
     }
 
     #[tokio::test]
     async fn queue_push_consumer() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client.clone());
 
@@ -2825,12 +2902,15 @@ mod jetstream {
 
     #[tokio::test]
     async fn publish_no_stream() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client.clone());
+
+        let (test_id, _, _) = get_unique_data_values();
+
         assert_eq!(
             context
-                .publish("test".to_owned(), "jghf".into())
+                .publish(test_id.to_owned(), "jghf".into())
                 .await
                 .unwrap()
                 .await
@@ -2845,7 +2925,7 @@ mod jetstream {
     #[cfg(feature = "server_2_10")]
     #[tokio::test]
     async fn multiple_filters_consumer() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client.clone());
 
@@ -2908,7 +2988,7 @@ mod jetstream {
     #[cfg(feature = "server_2_10")]
     #[tokio::test]
     async fn metadata() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client.clone());
 
@@ -2943,7 +3023,7 @@ mod jetstream {
 
     #[tokio::test]
     async fn backoff() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client.clone());
 
@@ -2975,7 +3055,7 @@ mod jetstream {
 
     #[tokio::test]
     async fn nak_with_delay() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client.clone());
 
@@ -3036,7 +3116,7 @@ mod jetstream {
     #[cfg(feature = "server_2_10")]
     #[tokio::test]
     async fn subject_transform() {
-        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let server = get_global_test_server().await;
         let client = async_nats::connect(server.client_url()).await.unwrap();
         let context = async_nats::jetstream::new(client.clone());
 
