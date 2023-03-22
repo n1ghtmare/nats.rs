@@ -111,6 +111,46 @@ mod object_store {
     }
 
     #[tokio::test]
+    async fn object_info_modified() {
+        let server = nats_server::run_server("tests/configs/jetstream.conf");
+        let client = async_nats::connect(server.client_url()).await.unwrap();
+
+        let jetstream = async_nats::jetstream::new(client);
+
+        let bucket = jetstream
+            .create_object_store(async_nats::jetstream::object_store::Config {
+                bucket: "bucket".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        bucket
+            .put("FOO", &mut io::Cursor::new(vec![2, 3, 4, 5]))
+            .await
+            .unwrap();
+
+        let original_info = bucket.info("FOO").await.unwrap();
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let new_info = bucket.info("FOO").await.unwrap();
+
+        // We should get back the same modified datetime
+        assert_eq!(original_info.modified, new_info.modified);
+
+        bucket
+            .put("FOO", &mut io::Cursor::new(vec![2, 3, 4, 5]))
+            .await
+            .unwrap();
+
+        let new_info = bucket.info("FOO").await.unwrap();
+
+        // We should get back different modified datetime because we've modified
+        assert_ne!(original_info.modified, new_info.modified);
+    }
+
+    #[tokio::test]
     async fn delete() {
         let server = nats_server::run_server("tests/configs/jetstream.conf");
         let client = async_nats::connect(server.client_url()).await.unwrap();
