@@ -37,6 +37,8 @@ use crate::{
     Error, StatusCode, Subscriber,
 };
 
+use crate::subject::Subject;
+
 use super::{AckPolicy, Consumer, DeliverPolicy, FromConsumer, IntoConsumerConfig, ReplayPolicy};
 use jetstream::consumer;
 
@@ -139,7 +141,7 @@ impl Consumer<Config> {
     pub(crate) async fn request_batch<I: Into<BatchConfig>>(
         &self,
         batch: I,
-        inbox: String,
+        inbox: Subject,
     ) -> Result<(), Error> {
         debug!("sending batch");
         let subject = format!(
@@ -151,7 +153,7 @@ impl Consumer<Config> {
 
         self.context
             .client
-            .publish_with_reply(subject, inbox, payload.into())
+            .publish_with_reply(subject.into(), inbox, payload.into())
             .await?;
         self.context.client.flush().await?;
         debug!("batch request sent");
@@ -340,7 +342,7 @@ pub struct Batch {
 
 impl<'a> Batch {
     async fn batch(batch: BatchConfig, consumer: &Consumer<Config>) -> Result<Batch, Error> {
-        let inbox = consumer.context.client.new_inbox();
+        let inbox = Subject::from(consumer.context.client.new_inbox());
         let subscription = consumer.context.client.subscribe(inbox.clone()).await?;
         consumer.request_batch(batch, inbox.clone()).await?;
 
@@ -452,11 +454,11 @@ impl<'a> futures::Stream for Sequence<'a> {
 
                 self.next = Some(Box::pin(async move {
                     let inbox = context.client.new_inbox();
-                    let subscriber = context.client.subscribe(inbox.clone()).await?;
+                    let subscriber = context.client.subscribe(inbox.clone().into()).await?;
 
                     context
                         .client
-                        .publish_with_reply(subject, inbox, request)
+                        .publish_with_reply(subject.into(), inbox.into(), request)
                         .await?;
 
                     // TODO(tp): Add timeout config and defaults.
@@ -520,7 +522,7 @@ impl Stream {
         consumer: &Consumer<Config>,
     ) -> Result<Stream, Error> {
         let inbox = consumer.context.client.new_inbox();
-        let subscription = consumer.context.client.subscribe(inbox.clone()).await?;
+        let subscription = consumer.context.client.subscribe(inbox.clone().into()).await?;
         let subject = format!(
             "{}.CONSUMER.MSG.NEXT.{}.{}",
             consumer.context.prefix, consumer.info.stream_name, consumer.info.name

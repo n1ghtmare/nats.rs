@@ -17,6 +17,7 @@ use crate::header::{IntoHeaderName, IntoHeaderValue};
 use crate::jetstream::account::Account;
 use crate::jetstream::publish::PublishAck;
 use crate::jetstream::response::Response;
+use crate::subject::Subject;
 use crate::{header, Client, Command, Error, HeaderMap, HeaderValue, StatusCode};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -126,7 +127,7 @@ impl Context {
     /// ```
     pub async fn publish(
         &self,
-        subject: String,
+        subject: Subject,
         payload: Bytes,
     ) -> Result<PublishAckFuture, Error> {
         self.send_publish(subject, Publish::build().payload(payload))
@@ -156,7 +157,7 @@ impl Context {
     /// ```
     pub async fn publish_with_headers(
         &self,
-        subject: String,
+        subject: Subject,
         headers: crate::header::HeaderMap,
         payload: Bytes,
     ) -> Result<PublishAckFuture, Error> {
@@ -188,17 +189,17 @@ impl Context {
     /// ```
     pub async fn send_publish(
         &self,
-        subject: String,
+        subject: Subject,
         publish: Publish,
     ) -> Result<PublishAckFuture, Error> {
-        let inbox = self.client.new_inbox();
+        let inbox = Subject::from(self.client.new_inbox());
         let response = self.client.subscribe(inbox.clone()).await?;
         tokio::time::timeout(self.timeout, async {
             if let Some(headers) = publish.headers {
                 self.client
                     .publish_with_reply_and_headers(
                         subject,
-                        inbox.clone(),
+                        inbox,
                         headers,
                         publish.payload,
                     )
@@ -303,7 +304,7 @@ impl Context {
             }
         }
         let subject = format!("STREAM.CREATE.{}", config.name);
-        let response: Response<Info> = self.request(subject, &config).await?;
+        let response: Response<Info> = self.request(subject.into(), &config).await?;
 
         match response {
             Response::Err { error } => Err(Box::new(std::io::Error::new(
@@ -345,7 +346,7 @@ impl Context {
         }
 
         let subject = format!("STREAM.INFO.{stream}");
-        let request: Response<Info> = self.request(subject, &()).await?;
+        let request: Response<Info> = self.request(subject.into(), &()).await?;
         match request {
             Response::Err { error } => Err(Box::new(std::io::Error::new(
                 ErrorKind::Other,
@@ -391,7 +392,7 @@ impl Context {
         let config: Config = stream_config.into();
         let subject = format!("STREAM.INFO.{}", config.name);
 
-        let request: Response<Info> = self.request(subject, &()).await?;
+        let request: Response<Info> = self.request(subject.into(), &()).await?;
         match request {
             Response::Err { error } if error.status == 404 => self.create_stream(&config).await,
             Response::Err { error } => Err(Box::new(io::Error::new(
@@ -432,7 +433,7 @@ impl Context {
             )));
         }
         let subject = format!("STREAM.DELETE.{stream}");
-        match self.request(subject, &json!({})).await? {
+        match self.request(subject.into(), &json!({})).await? {
             Response::Err { error } => Err(Box::new(std::io::Error::new(
                 ErrorKind::Other,
                 format!(
@@ -825,7 +826,7 @@ impl Context {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn request<T, V>(&self, subject: String, payload: &T) -> Result<Response<V>, Error>
+    pub async fn request<T, V>(&self, subject: Subject, payload: &T) -> Result<Response<V>, Error>
     where
         T: ?Sized + Serialize,
         V: DeserializeOwned,

@@ -67,7 +67,7 @@ impl Stream {
     /// # }
     /// ```
     pub async fn info(&mut self) -> Result<&Info, Error> {
-        let subject = format!("STREAM.INFO.{}", self.info.config.name);
+        let subject = format!("STREAM.INFO.{}", self.info.config.name).into();
 
         match self.context.request(subject, &json!({})).await? {
             Response::Ok::<Info>(info) => {
@@ -169,7 +169,7 @@ impl Stream {
             .context
             .client
             .request(
-                request_subject,
+                request_subject.into(),
                 serde_json::to_vec(&payload).map(Bytes::from)?,
             )
             .await
@@ -237,7 +237,7 @@ impl Stream {
             .context
             .client
             .request(
-                request_subject,
+                request_subject.into(),
                 serde_json::to_vec(&payload).map(Bytes::from)?,
             )
             .await
@@ -301,7 +301,7 @@ impl Stream {
         let response = self
             .context
             .client
-            .request(subject, serde_json::to_vec(&payload).map(Bytes::from)?)
+            .request(subject.into(), serde_json::to_vec(&payload).map(Bytes::from)?)
             .await
             .map(|message| Message {
                 context: self.context.clone(),
@@ -366,7 +366,7 @@ impl Stream {
         let response = self
             .context
             .client
-            .request(subject, "".into())
+            .request(subject.into(), "".into())
             .await
             .map(|message| Message {
                 context: self.context.clone(),
@@ -432,7 +432,7 @@ impl Stream {
             "seq": sequence,
         });
 
-        let response: Response<GetRawMessage> = self.context.request(subject, &payload).await?;
+        let response: Response<GetRawMessage> = self.context.request(subject.into(), &payload).await?;
         match response {
             Response::Err { error } => Err(Box::new(std::io::Error::new(
                 ErrorKind::Other,
@@ -481,7 +481,7 @@ impl Stream {
             "last_by_subj":  stream_subject,
         });
 
-        let response: Response<GetRawMessage> = self.context.request(subject, &payload).await?;
+        let response: Response<GetRawMessage> = self.context.request(subject.into(), &payload).await?;
         match response {
             Response::Err { error } => Err(Box::new(std::io::Error::new(ErrorKind::Other, error))),
             Response::Ok(value) => Ok(value.message),
@@ -517,7 +517,7 @@ impl Stream {
             "seq": sequence,
         });
 
-        let response: Response<DeleteStatus> = self.context.request(subject, &payload).await?;
+        let response: Response<DeleteStatus> = self.context.request(subject.into(), &payload).await?;
 
         match response {
             Response::Err { error } => Err(Box::new(std::io::Error::new(
@@ -641,7 +641,7 @@ impl Stream {
         match self
             .context
             .request(
-                subject,
+                subject.into(),
                 &json!({"stream_name": self.info.config.name.clone(), "config": config}),
             )
             .await?
@@ -682,7 +682,7 @@ impl Stream {
 
         let subject = format!("CONSUMER.INFO.{}.{}", self.info.config.name, name);
 
-        match self.context.request(subject, &json!({})).await? {
+        match self.context.request(subject.into(), &json!({})).await? {
             Response::Ok(info) => Ok(info),
             Response::Err { error } => Err(Box::new(std::io::Error::new(
                 ErrorKind::Other,
@@ -759,7 +759,7 @@ impl Stream {
     ) -> Result<Consumer<T>, Error> {
         let subject = format!("CONSUMER.INFO.{}.{}", self.info.config.name, name);
 
-        match self.context.request(subject, &json!({})).await? {
+        match self.context.request(subject.into(), &json!({})).await? {
             Response::Err { error } if error.status == 404 => self.create_consumer(config).await,
             Response::Err { error } => Err(Box::new(io::Error::new(
                 ErrorKind::Other,
@@ -799,7 +799,7 @@ impl Stream {
     pub async fn delete_consumer(&self, name: &str) -> Result<DeleteStatus, Error> {
         let subject = format!("CONSUMER.DELETE.{}.{}", self.info.config.name, name);
 
-        match self.context.request(subject, &json!({})).await? {
+        match self.context.request(subject.into(), &json!({})).await? {
             Response::Ok(delete_status) => Ok(delete_status),
             Response::Err { error } => Err(Box::new(std::io::Error::new(
                 ErrorKind::Other,

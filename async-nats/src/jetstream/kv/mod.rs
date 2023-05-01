@@ -196,7 +196,7 @@ impl Store {
         subject.push_str(self.put_prefix.as_ref().unwrap_or(&self.prefix));
         subject.push_str(key.as_ref());
 
-        let publish_ack = self.stream.context.publish(subject, value).await?;
+        let publish_ack = self.stream.context.publish(subject.into(), value).await?;
         let ack = publish_ack.await?;
 
         Ok(ack.sequence)
@@ -529,7 +529,7 @@ impl Store {
                 "invalid key",
             )));
         }
-        let subject = format!("{}{}", self.prefix.as_str(), key.as_ref());
+        let subject = format!("{}{}", self.prefix.as_str(), key.as_ref()).into();
 
         let mut headers = crate::HeaderMap::default();
         headers.insert(
@@ -588,7 +588,7 @@ impl Store {
 
         self.stream
             .context
-            .publish_with_headers(subject, headers, "".into())
+            .publish_with_headers(subject.into(), headers, "".into())
             .await?
             .await?;
         Ok(())
@@ -633,7 +633,7 @@ impl Store {
 
         self.stream
             .context
-            .publish_with_headers(subject, headers, "".into())
+            .publish_with_headers(subject.into(), headers, "".into())
             .await?
             .await?;
         Ok(())

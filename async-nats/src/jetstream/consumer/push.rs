@@ -85,7 +85,7 @@ impl Consumer<Config> {
     /// # }
     /// ```
     pub async fn messages(&self) -> Result<Messages, Error> {
-        let deliver_subject = self.info.config.deliver_subject.clone().unwrap();
+        let deliver_subject = self.info.config.deliver_subject.clone().unwrap().into();
         let subscriber = if let Some(ref group) = self.info.config.deliver_group {
             self.context
                 .client
@@ -436,7 +436,7 @@ impl Consumer<OrderedConfig> {
         let subscriber = self
             .context
             .client
-            .subscribe(self.info.config.deliver_subject.clone().unwrap())
+            .subscribe(self.info.config.deliver_subject.clone().unwrap().into())
             .await?;
 
         let last_seen = Arc::new(Mutex::new(Instant::now()));
@@ -684,7 +684,7 @@ async fn recreate_consumer_and_subscription(
 ) -> Result<Subscriber, Error> {
     let subscriber = context
         .client
-        .subscribe(config.deliver_subject.clone())
+        .subscribe(config.deliver_subject.clone().into())
         .await?;
 
     recreate_ephemeral_consumer(context, config, stream_name, sequence).await?;

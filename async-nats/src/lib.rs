@@ -243,7 +243,7 @@ pub enum Command {
     Publish {
         subject: Subject,
         payload: Bytes,
-        respond: Option<String>,
+        respond: Option<Subject>,
         headers: Option<HeaderMap>,
     },
     Subscribe {
@@ -270,7 +270,7 @@ pub enum ClientOp {
     Publish {
         subject: Subject,
         payload: Bytes,
-        respond: Option<String>,
+        respond: Option<Subject>,
         headers: Option<HeaderMap>,
     },
     Subscribe {
@@ -419,7 +419,7 @@ impl ConnectionHandler {
                 length,
             } => {
                 if let Some(subscription) = self.subscriptions.get_mut(&sid) {
-                    let message = Message {
+                    let message: Message = Message {
                         subject,
                         reply,
                         payload,

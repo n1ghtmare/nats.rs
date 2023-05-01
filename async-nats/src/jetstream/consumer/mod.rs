@@ -77,7 +77,7 @@ impl<T: IntoConsumerConfig> Consumer<T> {
     pub async fn info(&mut self) -> Result<&consumer::Info, Error> {
         let subject = format!("CONSUMER.INFO.{}.{}", self.info.stream_name, self.info.name);
 
-        match self.context.request(subject, &json!({})).await? {
+        match self.context.request(subject.into(), &json!({})).await? {
             Response::Ok::<Info>(info) => {
                 self.info = info;
                 Ok(&self.info)
@@ -93,7 +93,7 @@ impl<T: IntoConsumerConfig> Consumer<T> {
     }
 
     async fn fetch_info(&self) -> Result<consumer::Info, Error> {
-        let subject = format!("CONSUMER.INFO.{}.{}", self.info.stream_name, self.info.name);
+        let subject = format!("CONSUMER.INFO.{}.{}", self.info.stream_name, self.info.name).into();
 
         match self.context.request(subject, &json!({})).await? {
             Response::Ok::<Info>(info) => Ok(info),

@@ -21,6 +21,7 @@ use std::{
 };
 
 use crate::{HeaderMap, HeaderValue};
+use crate::subject::{Subject};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::engine::Engine;
 use once_cell::sync::Lazy;
@@ -158,7 +159,7 @@ impl ObjectStore {
         let mut headers = HeaderMap::default();
         headers.insert(NATS_ROLLUP, HeaderValue::from_str(ROLLUP_SUBJECT)?);
 
-        let subject = format!("$O.{}.M.{}", &self.name, encode_object_name(object_name));
+        let subject = format!("$O.{}.M.{}", &self.name, encode_object_name(object_name)).into();
 
         self.stream
             .context
@@ -254,7 +255,7 @@ impl ObjectStore {
         };
 
         let object_nuid = nuid::next();
-        let chunk_subject = format!("$O.{}.C.{}", &self.name, &object_nuid);
+        let chunk_subject = Subject::from(format!("$O.{}.C.{}", &self.name, &object_nuid));
 
         let mut object_chunks = 0;
         let mut object_size = 0;
@@ -304,7 +305,7 @@ impl ObjectStore {
         // publish meta.
         self.stream
             .context
-            .publish_with_headers(subject, headers, data.into())
+            .publish_with_headers(subject.into(), headers, data.into())
             .await?
             .await?;
 
