@@ -140,6 +140,7 @@ pub use tokio_rustls::rustls;
 use connection::{Connection, State};
 use connector::{Connector, ConnectorOptions};
 pub use header::{HeaderMap, HeaderName, HeaderValue};
+pub use subject::{Subject};
 
 pub(crate) mod auth_utils;
 mod client;
@@ -157,6 +158,7 @@ pub mod message;
 #[cfg(feature = "service")]
 pub mod service;
 pub mod status;
+pub mod subject;
 mod tls;
 
 pub use message::Message;
@@ -226,8 +228,8 @@ pub(crate) enum ServerOp {
     Error(ServerError),
     Message {
         sid: u64,
-        subject: String,
-        reply: Option<String>,
+        subject: Subject,
+        reply: Option<Subject>,
         payload: Bytes,
         headers: Option<HeaderMap>,
         status: Option<StatusCode>,
@@ -239,14 +241,14 @@ pub(crate) enum ServerOp {
 #[derive(Debug)]
 pub enum Command {
     Publish {
-        subject: String,
+        subject: Subject,
         payload: Bytes,
         respond: Option<String>,
         headers: Option<HeaderMap>,
     },
     Subscribe {
         sid: u64,
-        subject: String,
+        subject: Subject,
         queue_group: Option<String>,
         sender: mpsc::Sender<Message>,
     },
@@ -266,14 +268,14 @@ pub enum Command {
 #[derive(Debug)]
 pub enum ClientOp {
     Publish {
-        subject: String,
+        subject: Subject,
         payload: Bytes,
         respond: Option<String>,
         headers: Option<HeaderMap>,
     },
     Subscribe {
         sid: u64,
-        subject: String,
+        subject: Subject,
         queue_group: Option<String>,
     },
     Unsubscribe {
@@ -287,7 +289,7 @@ pub enum ClientOp {
 
 #[derive(Debug)]
 struct Subscription {
-    subject: String,
+    subject: Subject,
     sender: mpsc::Sender<Message>,
     queue_group: Option<String>,
     delivered: u64,
