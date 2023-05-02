@@ -583,7 +583,7 @@ impl Stream {
                     let request = serde_json::to_vec(&batch).map(Bytes::from).unwrap();
                     let result = context
                         .client
-                        .publish_with_reply(subject.clone(), inbox.clone(), request.clone())
+                        .publish_with_reply(subject.clone().into(), inbox.clone().into(), request.clone())
                         .await
                         .map(|_| pending_reset)
                         .map_err(|err| Box::from(io::Error::new(io::ErrorKind::Other, err)));

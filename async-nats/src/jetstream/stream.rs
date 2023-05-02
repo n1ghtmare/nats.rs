@@ -1143,7 +1143,7 @@ impl TryFrom<RawMessage> for crate::Message {
             decoded_headers.map_or_else(|| Ok((None, None, None)), |h| parse_headers(&h))?;
 
         Ok(crate::Message {
-            subject: value.subject,
+            subject: value.subject.into(),
             reply: None,
             payload: decoded_payload.into(),
             headers,
@@ -1447,7 +1447,7 @@ where
             let response: Response<PurgeResponse> = self
                 .stream
                 .context
-                .request(request_subject, &self.inner)
+                .request(request_subject.into(), &self.inner)
                 .await?;
 
             match response {
@@ -1528,7 +1528,7 @@ impl futures::Stream for ConsumerNames<'_> {
                     self.page_request = Some(Box::pin(async move {
                         match context
                             .request(
-                                format!("CONSUMER.NAMES.{stream}"),
+                                format!("CONSUMER.NAMES.{stream}").into(),
                                 &json!({
                                     "offset": offset,
                                 }),
@@ -1600,7 +1600,7 @@ impl futures::Stream for Consumers<'_> {
                     self.page_request = Some(Box::pin(async move {
                         match context
                             .request(
-                                format!("CONSUMER.LIST.{stream}"),
+                                format!("CONSUMER.LIST.{stream}").into(),
                                 &json!({
                                     "offset": offset,
                                 }),

@@ -245,7 +245,7 @@ mod client {
         let server = nats_server::run_basic_server();
         let client = async_nats::connect(server.client_url()).await.unwrap();
 
-        let inbox = "CUSTOMIZED".to_string();
+        let inbox = "CUSTOMIZED".into();
         let mut sub = client.subscribe("service".into()).await.unwrap();
 
         tokio::task::spawn({
@@ -441,7 +441,7 @@ mod client {
     #[tokio::test]
     async fn connection_callbacks() {
         let server = nats_server::run_basic_server();
-        let port = server.client_port().to_string();
+        let port = server.client_port().into();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
         let (dc_tx, mut dc_rx) = tokio::sync::mpsc::channel(128);
@@ -464,7 +464,7 @@ mod client {
             .await
             .unwrap();
         println!("connected");
-        client.subscribe("test".to_string()).await.unwrap();
+        client.subscribe("test".into()).await.unwrap();
         client.flush().await.unwrap();
 
         println!("dropped server {:?}", server.client_url());
@@ -503,9 +503,9 @@ mod client {
             .await
             .unwrap();
 
-        let mut sub = client.subscribe("data".to_string()).await.unwrap();
+        let mut sub = client.subscribe("data".into()).await.unwrap();
         client
-            .publish("data".to_string(), "data".into())
+            .publish("data".into(), "data".into())
             .await
             .unwrap();
         sub.next().await.unwrap();
@@ -536,18 +536,18 @@ mod client {
             .await
             .unwrap();
 
-        let _sub = client.subscribe("data".to_string()).await.unwrap();
+        let _sub = client.subscribe("data".into()).await.unwrap();
         client
-            .publish("data".to_string(), "data".into())
+            .publish("data".into(), "data".into())
             .await
             .unwrap();
         client
-            .publish("data".to_string(), "data".into())
+            .publish("data".into(), "data".into())
             .await
             .unwrap();
         client.flush().await.unwrap();
         client
-            .publish("data".to_string(), "data".into())
+            .publish("data".into(), "data".into())
             .await
             .unwrap();
         client.flush().await.unwrap();
@@ -571,9 +571,9 @@ mod client {
             .connect(server.client_url())
             .await
             .unwrap();
-        let mut subscription = client.subscribe("echo".to_string()).await.unwrap();
+        let mut subscription = client.subscribe("echo".into()).await.unwrap();
         client
-            .publish("echo".to_string(), "data".into())
+            .publish("echo".into(), "data".into())
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_millis(500), subscription.next())
@@ -587,9 +587,9 @@ mod client {
             .connect(server.client_url())
             .await
             .unwrap();
-        let mut subscription = client.subscribe("echo".to_string()).await.unwrap();
+        let mut subscription = client.subscribe("echo".into()).await.unwrap();
         client
-            .publish("echo".to_string(), "data".into())
+            .publish("echo".into(), "data".into())
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_millis(50), subscription.next())
@@ -605,7 +605,7 @@ mod client {
             .event_callback(move |err| {
                 let tx = tx.clone();
                 async move {
-                    tx.send(err.to_string()).unwrap();
+                    tx.send(err.into()).unwrap();
                 }
             })
             .connect(server.client_url())
@@ -671,7 +671,7 @@ mod client {
             .await
             .unwrap();
 
-        let mut inbox_wildcard_subscription = client.subscribe("BOB.>".to_string()).await.unwrap();
+        let mut inbox_wildcard_subscription = client.subscribe("BOB.>".into()).await.unwrap();
         let mut subscription = client.subscribe("request".into()).await.unwrap();
 
         tokio::task::spawn({

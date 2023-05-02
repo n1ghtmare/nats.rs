@@ -26,9 +26,9 @@ mod service {
         // not semver compatible version string.
         let err_kind = client
             .add_service(async_nats::service::Config {
-                name: "serviceA".to_string(),
+                name: "serviceA".into(),
                 description: None,
-                version: "1.0.0.1".to_string(),
+                version: "1.0.0.1".into(),
                 schema: None,
                 stats_handler: None,
             })
@@ -42,9 +42,9 @@ mod service {
         // not semver compatible version string.
         let err_kind = client
             .add_service(async_nats::service::Config {
-                name: "serviceB".to_string(),
+                name: "serviceB".into(),
                 description: None,
-                version: "beta-1.0.0".to_string(),
+                version: "beta-1.0.0".into(),
                 schema: None,
                 stats_handler: None,
             })
@@ -58,9 +58,9 @@ mod service {
         // bad service name name.
         let err_kind = client
             .add_service(async_nats::service::Config {
-                name: "service.B".to_string(),
+                name: "service.B".into(),
                 description: None,
-                version: "1.0.0".to_string(),
+                version: "1.0.0".into(),
                 schema: None,
                 stats_handler: None,
             })
@@ -74,9 +74,9 @@ mod service {
         // bad service name name.
         let err_kind = client
             .add_service(async_nats::service::Config {
-                name: "service B".to_string(),
+                name: "service B".into(),
                 description: None,
-                version: "1.0.0".to_string(),
+                version: "1.0.0".into(),
                 schema: None,
                 stats_handler: None,
             })
@@ -94,9 +94,9 @@ mod service {
         let client = async_nats::connect(server.client_url()).await.unwrap();
         client
             .add_service(async_nats::service::Config {
-                name: "serviceA".to_string(),
+                name: "serviceA".into(),
                 description: None,
-                version: "1.0.0".to_string(),
+                version: "1.0.0".into(),
                 schema: None,
                 stats_handler: None,
             })
@@ -105,9 +105,9 @@ mod service {
 
         client
             .add_service(async_nats::service::Config {
-                name: "serviceB".to_string(),
+                name: "serviceB".into(),
                 description: None,
-                version: "2.0.0".to_string(),
+                version: "2.0.0".into(),
                 schema: None,
                 stats_handler: None,
             })
@@ -117,7 +117,7 @@ mod service {
         let reply = client.new_inbox();
         let mut responses = client.subscribe(reply.clone()).await.unwrap();
         client
-            .publish_with_reply("$SRV.PING".to_string(), reply, "".into())
+            .publish_with_reply("$SRV.PING".into(), reply, "".into())
             .await
             .unwrap();
         responses.next().await.unwrap();
@@ -131,8 +131,8 @@ mod service {
 
         let service = client
             .add_service(async_nats::service::Config {
-                name: "serviceA".to_string(),
-                version: "1.0.0".to_string(),
+                name: "serviceA".into(),
+                version: "1.0.0".into(),
                 schema: None,
                 description: None,
                 stats_handler: None,
@@ -144,7 +144,7 @@ mod service {
         let reply = client.new_inbox();
         let mut responses = client.subscribe(reply.clone()).await.unwrap();
         client
-            .publish_with_reply("products".to_string(), reply.clone(), "data".into())
+            .publish_with_reply("products".into(), reply.clone(), "data".into())
             .await
             .unwrap();
         let request = products.next().await.unwrap();
@@ -154,13 +154,13 @@ mod service {
         let v2 = service.group("v2");
         let mut v2product = v2.endpoint("products").await.unwrap();
         client
-            .publish_with_reply("v2.products".to_string(), reply.clone(), "data".into())
+            .publish_with_reply("v2.products".into(), reply.clone(), "data".into())
             .await
             .unwrap();
         let request = v2product.next().await.unwrap();
         request.respond(Ok("v2".into())).await.unwrap();
         let message = responses.next().await.unwrap();
-        assert_eq!(from_utf8(&message.payload).unwrap(), "v2".to_string());
+        assert_eq!(from_utf8(&message.payload).unwrap(), "v2".into());
     }
 
     #[tokio::test]
@@ -170,8 +170,8 @@ mod service {
 
         let service = client
             .add_service(async_nats::service::Config {
-                name: "serviceA".to_string(),
-                version: "1.0.0".to_string(),
+                name: "serviceA".into(),
+                version: "1.0.0".into(),
                 schema: None,
                 description: None,
                 stats_handler: None,
@@ -183,19 +183,19 @@ mod service {
         let reply = client.new_inbox();
         let mut response = client.subscribe(reply.clone()).await.unwrap();
         client
-            .publish_with_reply("products".to_string(), reply.clone(), "data".into())
+            .publish_with_reply("products".into(), reply.clone(), "data".into())
             .await
             .unwrap();
         client
-            .publish_with_reply("products".to_string(), reply.clone(), "data".into())
+            .publish_with_reply("products".into(), reply.clone(), "data".into())
             .await
             .unwrap();
         client
-            .publish_with_reply("products".to_string(), reply.clone(), "data".into())
+            .publish_with_reply("products".into(), reply.clone(), "data".into())
             .await
             .unwrap();
         client
-            .publish_with_reply("products".to_string(), reply.clone(), "data".into())
+            .publish_with_reply("products".into(), reply.clone(), "data".into())
             .await
             .unwrap();
         client.flush().await.unwrap();
@@ -211,7 +211,7 @@ mod service {
             request
                 .respond(Err(async_nats::service::error::Error {
                     code: 503,
-                    status: "error".to_string(),
+                    status: "error".into(),
                 }))
                 .await
                 .unwrap();
@@ -223,8 +223,8 @@ mod service {
             .map(|message| serde_json::from_slice::<Info>(&message.payload))
             .unwrap()
             .unwrap();
-        assert_eq!(info.version, "1.0.0".to_string());
-        assert_eq!(info.name, "serviceA".to_string());
+        assert_eq!(info.version, "1.0.0".into());
+        assert_eq!(info.name, "serviceA".into());
 
         let stats = client
             .request("$SRV.STATS".into(), "".into())
@@ -280,12 +280,12 @@ mod service {
                 .iter()
                 .next()
                 .unwrap(),
-            "error".to_string()
+            "error".into()
         );
 
         // service should not respond anymore, as its stopped.
         client
-            .request("$SRV.PING".to_string(), "".into())
+            .request("$SRV.PING".into(), "".into())
             .await
             .unwrap_err();
     }
@@ -315,7 +315,7 @@ mod service {
                     request
                         .respond(Err(async_nats::service::error::Error {
                             code: 503,
-                            status: "empty payload".to_string(),
+                            status: "empty payload".into(),
                         }))
                         .await
                         .unwrap();
