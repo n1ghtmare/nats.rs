@@ -115,6 +115,7 @@ pub struct Config {
     pub metadata: Option<HashMap<String, String>>,
 }
 
+/// A builder for constructing a [Service]
 pub struct ServiceBuilder {
     client: Client,
     description: Option<String>,
@@ -523,11 +524,17 @@ impl Service {
     }
 }
 
+/// A group for managing a collection of endpoints under a common prefix.
 pub struct Group {
+    /// The common prefix for the endpoints in the group.
     prefix: String,
+    /// A thread-safe shared reference to the statistics data for the group.
     stats: Arc<Mutex<Endpoints>>,
+    /// The NATS client associated with the group.
     client: Client,
+    /// A broadcast sender used for shutting down the group.
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    /// A thread-safe shared reference to the list of subjects associated with the group.
     subjects: Arc<Mutex<Vec<String>>>,
 }
 
@@ -702,6 +709,7 @@ impl Request {
     }
 }
 
+/// Builder for creating and configuring an [Endpoint]
 #[derive(Debug)]
 pub struct EndpointBuilder {
     client: Client,

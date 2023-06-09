@@ -26,6 +26,7 @@ use crate::{Client, Subscriber};
 
 use super::{error, Endpoints, Request, ShutdownReceiverFuture};
 
+/// Represents an endpoint for receiving requests.
 pub struct Endpoint {
     pub(crate) requests: Subscriber,
     pub(crate) stats: Arc<Mutex<Endpoints>>,
@@ -150,9 +151,10 @@ impl From<Inner> for Stats {
     }
 }
 
+/// Represents the statistics data for an [Endpoint].
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Stats {
-    // Response type.
+    /// Response type.
     #[serde(rename = "type")]
     pub kind: String,
     /// Endpoint name.
